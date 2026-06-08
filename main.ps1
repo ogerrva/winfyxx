@@ -1,4 +1,4 @@
-# Oculta o console do PowerShell imediatamente para não atrapalhar o usuário
+# Oculta o console do PowerShell imediatamente para manter apenas a interface visível
 $showWindowAsync = Add-Type -MemberDefinition @"
 [DllImport("user32.dll")]
 public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
@@ -58,39 +58,34 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Método para instalar arquivos locais e criar o atalho de forma silenciosa
+# Cria o atalho de forma silenciosa e garante os arquivos locais atualizados
 function Install-LocalFilesAndShortcut {
     try {
-        # Baixa os arquivos atualizados do GitHub para a pasta persistente local
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1" -OutFile $LocalScriptPath
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json" -OutFile $JsonPath
         
-        # Cria o atalho (.lnk) na Área de Trabalho se ele não existir
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
-            # O atalho executa com a tela totalmente oculta (-WindowStyle Hidden)
             $Shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho 'FYXX Utility' criado na Área de Trabalho."
+            Write-Log "Atalho 'FYXX Utility' criado com sucesso na sua Área de Trabalho."
         }
     }
     catch {
-        Write-Log "Aviso: Falha ao atualizar ou criar o atalho local."
+        Write-Log "Aviso: Falha ao sincronizar arquivos ou criar o atalho local."
     }
 }
 
-# --- CARREGA O ARQUIVO JSON LOCAL ---
-# Se o arquivo não existir localmente por algum problema de conexão, ele baixa diretamente do seu GitHub temporariamente
+# Garante o carregamento inicial do arquivo JSON local
 if (-not (Test-Path $JsonPath)) {
     try {
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json" -OutFile $JsonPath
     }
     catch {
-        # Fallback de segurança se estiver offline na primeira execução
         New-Item -ItemType File -Path $JsonPath -Force | Out-Null
     }
 }
@@ -251,23 +246,20 @@ $btnAutoActivate.Size = New-Object System.Drawing.Size(200, 35)
 $tabActivation.Controls.Add($btnAutoActivate)
 
 
-# --- LÓGICA DE EXECUÇÃO MULTIPROCESSO ---
+# --- LÓGICA DE EXECUÇÃO ASSÍNCRONA ---
 
 $form.Add_Load({
     Write-Log "Iniciando verificação do sistema..."
     
-    # Executa a cópia de arquivos e criação do atalho local em segundo plano
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         Install-LocalFilesAndShortcut
         
-        # Validação do Winget
         if (Test-Winget) {
             Write-Log "Gerenciador de pacotes Winget pronto para uso."
         } else {
-            Write-Log "Aviso: Winget não detectado. Algumas funções podem necessitar de instalação prévia."
+            Write-Log "Aviso: Winget não detectado no sistema."
         }
         
-        # Consulta de ativação do Windows
         $status = "Não Ativado"
         $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
         if ($check -match "permanente|permanent|ativado|activated") {
@@ -281,7 +273,6 @@ $form.Add_Load({
     }) | Out-Null
 })
 
-# Lógica de ativação silenciosa e não bloqueante do seu BAT
 $btnAutoActivate.Add_Click({
     $btnAutoActivate.Enabled = $false
     Write-Log "Iniciando processo de ativação silenciosa..."
@@ -289,7 +280,7 @@ $btnAutoActivate.Add_Click({
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
         if ($check -match "permanente|permanent|ativado|activated") {
-            Write-Log "O Windows já está devidamente ativado."
+            Write-Log "O Windows já está ativado."
             $form.Invoke([Action]{ $btnAutoActivate.Enabled = $true })
             return
         }
@@ -303,11 +294,9 @@ $btnAutoActivate.Add_Click({
         foreach ($server in $KMS_Servers) {
             Write-Log "Tentando conexão com o servidor KMS: $server..."
             
-            # Executa os comandos do slmgr silenciosamente
             $pSkms = Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /skms $server" -NoNewWindow -PassThru -Wait
             $pAto = Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /ato" -NoNewWindow -PassThru -Wait
             
-            # Valida se obteve sucesso
             $checkStatus = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
             if ($checkStatus -match "permanente|permanent|ativado|activated") {
                 $success = $true
@@ -327,7 +316,6 @@ $btnAutoActivate.Add_Click({
     }) | Out-Null
 })
 
-# Instalação Lote (Assíncrona)
 $btnInstallSelected.Add_Click({
     $selected = $installCheckboxes | Where-Object { $_.Checked -eq $true }
     if ($selected.Count -eq 0) {
@@ -352,12 +340,11 @@ $btnInstallSelected.Add_Click({
                 Write-Log "Não foi possível concluir a instalação de: $name."
             }
         }
-        Write-Log "Processos finalizados."
+        Write-Log "Processos de instalação finalizados."
         $form.Invoke([Action]{ $btnInstallSelected.Enabled = $true })
     }) | Out-Null
 })
 
-# Desinstalação Lote (Assíncrona)
 $btnUninstallSelected.Add_Click({
     $selected = $uninstallCheckboxes | Where-Object { $_.Checked -eq $true }
     if ($selected.Count -eq 0) {
@@ -387,7 +374,80 @@ $btnUninstallSelected.Add_Click({
     }) | Out-Null
 })
 
-# Atualização em Lote (Assíncrona)
 $btnUpgradeAll.Add_Click({
     $btnUpgradeAll.Enabled = $false
-    Write-Lo
+    Write-Log "Iniciando atualização de softwares instalados..."
+    
+    [System.Threading.ThreadPool]::QueueUserWorkItem({
+        $proc = Start-Process winget -ArgumentList "upgrade --all --silent" -NoNewWindow -PassThru -Wait
+        Write-Log "Processo de atualizações globais finalizado."
+        $form.Invoke([Action]{ $btnUpgradeAll.Enabled = $true })
+    }) | Out-Null
+})
+
+$btnListInstalled.Add_Click({
+    Write-Log "Consultando softwares locais..."
+    [System.Threading.ThreadPool]::QueueUserWorkItem({
+        $list = winget list
+        foreach ($line in $list) {
+            Write-Log $line
+        }
+        Write-Log "Fim da lista de softwares locais."
+    }) | Out-Null
+})
+
+$btnEdgeTweak.Add_Click({
+    Write-Log "Iniciando aplicação de diretivas no Edge..."
+    [System.Threading.ThreadPool]::QueueUserWorkItem({
+        $res = Set-EdgeGoogleDefault
+        if ($res) {
+            Write-Log "O Google foi configurado com sucesso como padrão no Edge."
+        } else {
+            Write-Log "Erro ao tentar salvar as chaves no registro."
+        }
+    }) | Out-Null
+})
+
+$btnCustomInstall.Add_Click({
+    $inputBox = New-Object System.Windows.Forms.Form
+    $inputBox.Text = "Pesquisa Customizada"
+    $inputBox.Size = New-Object System.Drawing.Size(400, 150)
+    $inputBox.StartPosition = "CenterParent"
+    $inputBox.FormBorderStyle = "FixedDialog"
+    $inputBox.MaximizeBox = $false
+    
+    $lblPrompt = New-Object System.Windows.Forms.Label
+    $lblPrompt.Text = "Digite o nome do programa a ser pesquisado:"
+    $lblPrompt.Location = New-Object System.Drawing.Point(20, 15)
+    $lblPrompt.Size = New-Object System.Drawing.Size(350, 20)
+    $inputBox.Controls.Add($lblPrompt)
+    
+    $txtInput = New-Object System.Windows.Forms.TextBox
+    $txtInput.Location = New-Object System.Drawing.Point(20, 40)
+    $txtInput.Size = New-Object System.Drawing.Size(340, 20)
+    $inputBox.Controls.Add($txtInput)
+    
+    $btnOk = New-Object System.Windows.Forms.Button
+    $btnOk.Text = "Pesquisar"
+    $btnOk.Location = New-Object System.Drawing.Point(20, 75)
+    $btnOk.Size = New-Object System.Drawing.Size(100, 25)
+    $inputBox.Controls.Add($btnOk)
+    
+    $btnOk.Add_Click({
+        $progName = $txtInput.Text
+        if (-not [string]::IsNullOrEmpty($progName)) {
+            Write-Log "Buscando por: '$progName' no catálogo..."
+            [System.Threading.ThreadPool]::QueueUserWorkItem({
+                $results = winget search --name $progName
+                foreach ($line in $results) {
+                    Write-Log $line
+                }
+            }) | Out-Null
+            $inputBox.Close()
+        }
+    })
+    $inputBox.ShowDialog() | Out-Null
+})
+
+# Executa o formulário
+[System.Windows.Forms.Application]::Run($form)
