@@ -6,13 +6,17 @@ public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
 
 $hwnd = (Get-Process -Id $PID).MainWindowHandle
 if ($hwnd -ne [IntPtr]::Zero) {
-    # nCmdShow = 0 (Oculta a janela)
     $showWindowAsync::ShowWindowAsync($hwnd, 0) | Out-Null
 }
 
-# Garante privilégios de Administrador
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+# Garante privilégios de Administrador de acordo com o ambiente (IEX ou Local)
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    if ($PSCommandPath) {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    } else {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
+    }
     Exit
 }
 
@@ -20,7 +24,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# --- DIRETÓRIO LOCAL E INSTALAÇÃO DO ATALHO ---
+# --- DIRETÓRIO LOCAL E ATUALIZAÇÃO ---
 $InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
 $JsonPath = Join-Path $InstallDir "apps.json"
 $LocalScriptPath = Join-Path $InstallDir "main.ps1"
@@ -58,11 +62,14 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Cria o atalho de forma silenciosa e garante os arquivos locais atualizados
+# Atualiza arquivos locais e cria o atalho silenciando o cache
 function Install-LocalFilesAndShortcut {
     try {
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1" -OutFile $LocalScriptPath
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json" -OutFile $JsonPath
+        $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate"; "Pragma" = "no-cache" }
+        
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
@@ -72,25 +79,40 @@ function Install-LocalFilesAndShortcut {
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho 'FYXX Utility' criado com sucesso na sua Área de Trabalho."
+            Write-Log "Atalho local atualizado com sucesso na Área de Trabalho."
         }
     }
     catch {
-        Write-Log "Aviso: Falha ao sincronizar arquivos ou criar o atalho local."
+        Write-Log "Aviso: Sincronização offline ou indisponível temporariamente."
     }
 }
 
-# Garante o carregamento inicial do arquivo JSON local
-if (-not (Test-Path $JsonPath)) {
+# --- CARREGAMENTO RESILIENTE DO JSON ---
+$AppConfig = $null
+if (Test-Path $JsonPath) {
     try {
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json" -OutFile $JsonPath
+        $AppConfig = Get-Content $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
-        New-Item -ItemType File -Path $JsonPath -Force | Out-Null
+        Write-Log "Tentando recuperar apps.json..."
     }
 }
 
-$AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
+# Fallback se o arquivo estiver corrompido ou ausente no carregamento inicial
+if (-not $AppConfig) {
+    try {
+        $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate" }
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
+        $AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        # Lista unificada padrão embutida na memória para prevenir falha offline
+        $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
+        $AppConfig = $DefaultApps | ConvertFrom-Json
+        $DefaultApps | Out-File $JsonPath -Encoding utf8
+    }
+}
 
 # --- CONSTRUÇÃO DA INTERFACE GRÁFICA (GUI) ---
 
@@ -141,23 +163,26 @@ $tabControl.Location = New-Object System.Drawing.Point(20, 80)
 $tabControl.Size = New-Object System.Drawing.Size(690, 320)
 $form.Controls.Add($tabControl)
 
+# --- CONFIGURAÇÃO DINÂMICA DE COLUNAS DOS CHECKBOXES ---
+$colX = @(20, 240, 460)
+$startY = 20
+$rowSpacing = 28
+# Distribui proporcionalmente os programas entre 3 colunas
+$itemsPerColumn = [math]::Ceiling($AppConfig.Count / 3)
+
 # --- ABA 1: INSTALAÇÃO ---
 $tabInstall = New-Object System.Windows.Forms.TabPage
 $tabInstall.Text = "Instalação"
 $tabControl.Controls.Add($tabInstall)
 
 $installCheckboxes = @()
-$colX = @(20, 240, 460)
-$startY = 20
-$rowSpacing = 30
-
-for ($i = 0; $i -lt $AppConfig.install.Count; $i++) {
-    $colIndex = [math]::Floor($i / 5)
-    $rowIndex = $i % 5
+for ($i = 0; $i -lt $AppConfig.Count; $i++) {
+    $colIndex = [math]::Floor($i / $itemsPerColumn)
+    $rowIndex = $i % $itemsPerColumn
     
     $cb = New-Object System.Windows.Forms.CheckBox
-    $cb.Text = $AppConfig.install[$i].Name
-    $cb.Tag = $AppConfig.install[$i].ID
+    $cb.Text = $AppConfig[$i].Name
+    $cb.Tag = $AppConfig[$i].ID
     $cb.Location = New-Object System.Drawing.Point($colX[$colIndex], ($startY + ($rowIndex * $rowSpacing)))
     $cb.Size = New-Object System.Drawing.Size(200, 20)
     $tabInstall.Controls.Add($cb)
@@ -166,13 +191,13 @@ for ($i = 0; $i -lt $AppConfig.install.Count; $i++) {
 
 $btnInstallSelected = New-Object System.Windows.Forms.Button
 $btnInstallSelected.Text = "Instalar Selecionados"
-$btnInstallSelected.Location = New-Object System.Drawing.Point(20, 200)
+$btnInstallSelected.Location = New-Object System.Drawing.Point(20, 240)
 $btnInstallSelected.Size = New-Object System.Drawing.Size(180, 30)
 $tabInstall.Controls.Add($btnInstallSelected)
 
 $btnCustomInstall = New-Object System.Windows.Forms.Button
 $btnCustomInstall.Text = "Pesquisa e Instal. Personalizada"
-$btnCustomInstall.Location = New-Object System.Drawing.Point(220, 200)
+$btnCustomInstall.Location = New-Object System.Drawing.Point(220, 240)
 $btnCustomInstall.Size = New-Object System.Drawing.Size(220, 30)
 $tabInstall.Controls.Add($btnCustomInstall)
 
@@ -183,13 +208,13 @@ $tabUninstall.Text = "Desinstalação"
 $tabControl.Controls.Add($tabUninstall)
 
 $uninstallCheckboxes = @()
-for ($i = 0; $i -lt $AppConfig.uninstall.Count; $i++) {
-    $colIndex = [math]::Floor($i / 5)
-    $rowIndex = $i % 5
+for ($i = 0; $i -lt $AppConfig.Count; $i++) {
+    $colIndex = [math]::Floor($i / $itemsPerColumn)
+    $rowIndex = $i % $itemsPerColumn
     
     $cb = New-Object System.Windows.Forms.CheckBox
-    $cb.Text = $AppConfig.uninstall[$i].Name
-    $cb.Tag = $AppConfig.uninstall[$i].ID
+    $cb.Text = $AppConfig[$i].Name
+    $cb.Tag = $AppConfig[$i].ID
     $cb.Location = New-Object System.Drawing.Point($colX[$colIndex], ($startY + ($rowIndex * $rowSpacing)))
     $cb.Size = New-Object System.Drawing.Size(200, 20)
     $tabUninstall.Controls.Add($cb)
@@ -198,13 +223,13 @@ for ($i = 0; $i -lt $AppConfig.uninstall.Count; $i++) {
 
 $btnUninstallSelected = New-Object System.Windows.Forms.Button
 $btnUninstallSelected.Text = "Desinstalar Selecionados"
-$btnUninstallSelected.Location = New-Object System.Drawing.Point(20, 200)
+$btnUninstallSelected.Location = New-Object System.Drawing.Point(20, 240)
 $btnUninstallSelected.Size = New-Object System.Drawing.Size(180, 30)
 $tabUninstall.Controls.Add($btnUninstallSelected)
 
 $btnListInstalled = New-Object System.Windows.Forms.Button
 $btnListInstalled.Text = "Listar Todos no Sistema"
-$btnListInstalled.Location = New-Object System.Drawing.Point(220, 200)
+$btnListInstalled.Location = New-Object System.Drawing.Point(220, 240)
 $btnListInstalled.Size = New-Object System.Drawing.Size(200, 30)
 $tabUninstall.Controls.Add($btnListInstalled)
 
@@ -249,15 +274,16 @@ $tabActivation.Controls.Add($btnAutoActivate)
 # --- LÓGICA DE EXECUÇÃO ASSÍNCRONA ---
 
 $form.Add_Load({
-    Write-Log "Iniciando verificação do sistema..."
+    Write-Log "Iniciando verificação operacional..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
+        # Sincroniza arquivos e atualiza o atalho na Área de Trabalho
         Install-LocalFilesAndShortcut
         
         if (Test-Winget) {
-            Write-Log "Gerenciador de pacotes Winget pronto para uso."
+            Write-Log "Gerenciador de pacotes Winget pronto."
         } else {
-            Write-Log "Aviso: Winget não detectado no sistema."
+            Write-Log "Aviso: Winget ausente no sistema."
         }
         
         $status = "Não Ativado"
@@ -268,7 +294,7 @@ $form.Add_Load({
         
         $form.Invoke([Action]{
             $lblStatus.Text = "Status do Windows: $status"
-            Write-Log "Licença do sistema operacional detectada como: $status"
+            Write-Log "Licenciamento verificado: $status"
         })
     }) | Out-Null
 })
