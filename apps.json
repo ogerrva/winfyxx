@@ -1,36 +1,19 @@
-{
-  "install": [
-    { "Name": "Discord", "ID": "Discord.Discord" },
-    { "Name": "Epic Games", "ID": "EpicGames.EpicGamesLauncher" },
-    { "Name": "WinRAR", "ID": "RARLab.WinRAR" },
-    { "Name": "EA Play", "ID": "ElectronicArts.EADesktop" },
-    { "Name": "Ubisoft Connect", "ID": "Ubisoft.Connect" },
-    { "Name": "Terminus SSH", "ID": "Termius.Termius" },
-    { "Name": "Telegram", "ID": "Telegram.TelegramDesktop" },
-    { "Name": "VSCode", "ID": "Microsoft.VisualStudioCode" },
-    { "Name": "VLC", "ID": "VideoLAN.VLC" },
-    { "Name": "CPU-Z", "ID": "CPUID.CPU-Z" },
-    { "Name": "Chrome", "ID": "Google.Chrome" },
-    { "Name": "Firefox", "ID": "Mozilla.Firefox" },
-    { "Name": "Edge", "ID": "Microsoft.Edge" },
-    { "Name": "Opera", "ID": "Opera.Opera" },
-    { "Name": "GeForce Experience", "ID": "Nvidia.GeForceExperience" }
-  ],
-  "uninstall": [
-    { "Name": "Discord", "ID": "Discord.Discord" },
-    { "Name": "Epic Games", "ID": "EpicGames.EpicGamesLauncher" },
-    { "Name": "WinRAR", "ID": "RARLab.WinRAR" },
-    { "Name": "EA Play", "ID": "ElectronicArts.EADesktop" },
-    { "Name": "Ubisoft Connect", "ID": "Ubisoft.Connect" },
-    { "Name": "FileZilla", "ID": "FileZilla.FileZillaClient" },
-    { "Name": "Telegram", "ID": "Telegram.TelegramDesktop" },
-    { "Name": "VSCode", "ID": "Microsoft.VisualStudioCode" },
-    { "Name": "VLC", "ID": "VideoLAN.VLC" },
-    { "Name": "CPU-Z", "ID": "CPUID.CPU-Z" },
-    { "Name": "Chrome", "ID": "Google.Chrome" },
-    { "Name": "Firefox", "ID": "Mozilla.Firefox" },
-    { "Name": "Edge", "ID": "Microsoft.Edge" },
-    { "Name": "Opera", "ID": "Opera.Opera" },
-    { "Name": "Brave", "ID": "BraveSoftware.BraveBrowser" }
-  ]
-}
+[
+  { "Name": "Discord", "ID": "Discord.Discord" },
+  { "Name": "Epic Games", "ID": "EpicGames.EpicGamesLauncher" },
+  { "Name": "WinRAR", "ID": "RARLab.WinRAR" },
+  { "Name": "EA Play", "ID": "ElectronicArts.EADesktop" },
+  { "Name": "Ubisoft Connect", "ID": "Ubisoft.Connect" },
+  { "Name": "Terminus SSH", "ID": "Termius.Termius" },
+  { "Name": "FileZilla", "ID": "FileZilla.FileZillaClient" },
+  { "Name": "Brave Browser", "ID": "BraveSoftware.BraveBrowser" },
+  { "Name": "Telegram", "ID": "Telegram.TelegramDesktop" },
+  { "Name": "VSCode", "ID": "Microsoft.VisualStudioCode" },
+  { "Name": "VLC", "ID": "VideoLAN.VLC" },
+  { "Name": "CPU-Z", "ID": "CPUID.CPU-Z" },
+  { "Name": "Chrome", "ID": "Google.Chrome" },
+  { "Name": "Firefox", "ID": "Mozilla.Firefox" },
+  { "Name": "Edge", "ID": "Microsoft.Edge" },
+  { "Name": "Opera", "ID": "Opera.Opera" },
+  { "Name": "GeForce Experience", "ID": "Nvidia.GeForceExperience" }
+]
