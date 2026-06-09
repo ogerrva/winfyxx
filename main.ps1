@@ -1,4 +1,4 @@
-# Carrega as APIs nativas do Windows para gerenciar o console em segundo plano de forma estável
+# 1. Carrega as APIs nativas do Windows para gerenciar o console em segundo plano
 $win32 = Add-Type -MemberDefinition @"
 [DllImport("kernel32.dll")]
 public static extern IntPtr GetConsoleWindow();
@@ -6,20 +6,39 @@ public static extern IntPtr GetConsoleWindow();
 public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
 "@ -Name "Win32ConsoleUtils" -Namespace "Win32" -PassThru
 
-# Captura e oculta o terminal de forma limpa, mantendo o processo vivo em segundo plano
+# Captura e oculta o terminal de forma limpa, mantendo o processo ativo em segundo plano
 $hwnd = $win32::GetConsoleWindow()
 if ($hwnd -ne [IntPtr]::Zero) {
     # nCmdShow = 0 (Oculta o console sem fechar o processo)
     $win32::ShowWindowAsync($hwnd, 0) | Out-Null
 }
 
-# Garante privilégios de Administrador de acordo com o ambiente (IEX ou Local)
+# 2. SISTEMA DE LOGS PREVENTIVO (Definido logo no início para evitar travamentos de escopo)
+$global:InitialLogs = @()
+$logTextBox = $null # Será associado mais tarde ao controle visual
+
+function Write-Log ($Message) {
+    $timestamp = Get-Date -Format "HH:mm:ss"
+    $text = "[$timestamp] $Message`r`n"
+    if ($null -ne $logTextBox) {
+        if ($form.InvokeRequired) {
+            $form.Invoke([Action[string]]{ $logTextBox.AppendText($args[0]) }, $text)
+        } else {
+            $logTextBox.AppendText($text)
+        }
+    } else {
+        # Se a interface gráfica ainda não existe, salva o log em cache temporário
+        $global:InitialLogs += $text
+        Write-Host $text -ErrorAction SilentlyContinue
+    }
+}
+
+# 3. VERIFICAÇÃO DE PRIVILÉGIOS ADMINISTRATIVOS
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     if ($PSCommandPath) {
         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     } else {
-        # Executa sem WindowStyle Hidden para que as APIs gráficas do Windows se associem de forma estável
         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
     }
     Exit
@@ -29,7 +48,7 @@ if (-not $isAdmin) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# --- DIRETÓRIO LOCAL E ATUALIZAÇÃO ---
+# --- DIRETÓRIOS E COMPATIBILIDADE ---
 $InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
 $JsonPath = Join-Path $InstallDir "apps.json"
 $LocalScriptPath = Join-Path $InstallDir "main.ps1"
@@ -41,7 +60,7 @@ if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# --- FUNÇÕES AUXILIARES ---
+# --- FUNÇÕES OPERACIONAIS ---
 
 function Test-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
@@ -68,7 +87,7 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Atualiza arquivos locais e cria o atalho silenciando o cache
+# Sincroniza arquivos e configura o atalho
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
@@ -78,31 +97,28 @@ function Install-LocalFilesAndShortcut {
             "User-Agent"    = "FYXX-Utility-Updater"
         }
         
-        # Consulta a assinatura do último commit no GitHub
         $ApiUrl = "https://api.github.com/repos/ogerrva/winfyxx/commits/main"
         $remoteSha = (Invoke-RestMethod -Uri $ApiUrl -Headers $headers -ErrorAction Stop).sha
         
-        # Compara com a versão local existente
         $localSha = ""
         if (Test-Path $LocalVersionPath) {
             $localSha = Get-Content $LocalVersionPath -Raw
         }
         
         if ($remoteSha -ne $localSha) {
-            Write-Log "Nova versão detectada no repositório. Sincronizando..."
+            Write-Log "Nova versão de arquivos detectada. Sincronizando repositório..."
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
             $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
-            Write-Log "Arquivos locais atualizados com sucesso."
+            Write-Log "Arquivos locais sincronizados."
         } else {
-            Write-Log "O programa já está na versão mais recente."
+            Write-Log "Os arquivos do programa já estão atualizados."
         }
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
-            # O atalho local executa sem janela de comando visível
             $Shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
@@ -122,7 +138,7 @@ if (Test-Path $JsonPath) {
         $AppConfig = Get-Content $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
-        Write-Log "Tentando recuperar apps.json..."
+        Write-Log "Iniciando recuperação de apps.json..."
     }
 }
 
@@ -135,10 +151,18 @@ if (-not $AppConfig) {
         $AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
     }
     catch {
+        # Lista local imutável em caso de erro crítico de conectividade
         $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
         $AppConfig = $DefaultApps | ConvertFrom-Json
         $DefaultApps | Out-File $JsonPath -Encoding utf8
     }
+}
+
+# Prevenção matemática contra falha catastrófica de dimensionamento do array
+if ($null -eq $AppConfig -or $AppConfig.Count -eq 0) {
+    $AppConfig = @(
+        @{ Name = "Discord"; ID = "Discord.Discord" }
+    )
 }
 
 # --- CONSTRUÇÃO DA INTERFACE GRÁFICA (GUI) ---
@@ -150,7 +174,7 @@ $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 
-# CRÍTICO: Força o Windows a registrar o identificador único (Handle) da janela no thread principal de imediato
+# CRÍTICO: Força a criação do identificador de tela no Thread principal antes de qualquer processo concorrente
 $null = $form.Handle
 
 $titleLabel = New-Object System.Windows.Forms.Label
@@ -178,15 +202,10 @@ $logTextBox.BackColor = [System.Drawing.Color]::Black
 $logTextBox.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($logTextBox)
 
-# Função de Log Thread-Safe (Garante a escrita concorrente estável das Threads)
-function Write-Log ($Message) {
-    $timestamp = Get-Date -Format "HH:mm:ss"
-    $text = "[$timestamp] $Message`r`n"
-    if ($form.InvokeRequired) {
-        $form.Invoke([Action[string]]{ $logTextBox.AppendText($args[0]) }, $text)
-    } else {
-        $logTextBox.AppendText($text)
-    }
+# Descarrega com segurança todos os logs que ocorreram antes de a janela ser criada
+if ($global:InitialLogs.Count -gt 0) {
+    $logTextBox.AppendText([string]::Join("", $global:InitialLogs))
+    $global:InitialLogs = @() # Limpa o buffer de cache
 }
 
 $tabControl = New-Object System.Windows.Forms.TabControl
@@ -199,6 +218,7 @@ $colX = @(20, 240, 460)
 $startY = 20
 $rowSpacing = 28
 $itemsPerColumn = [math]::Ceiling($AppConfig.Count / 3)
+if ($itemsPerColumn -lt 1) { $itemsPerColumn = 1 }
 
 # --- ABA 1: INSTALAÇÃO ---
 $tabInstall = New-Object System.Windows.Forms.TabPage
