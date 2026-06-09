@@ -1,21 +1,64 @@
-# 1. Carrega as APIs nativas do Windows para gerenciar o console em segundo plano
-$win32 = Add-Type -MemberDefinition @"
-[DllImport("kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-"@ -Name "Win32ConsoleUtils" -Namespace "Win32" -PassThru
+# --- DETERMINA SE ESTÁ RODANDO COMO ADMIN ---
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-# Captura e oculta o terminal de forma limpa, mantendo o processo ativo em segundo plano
-$hwnd = $win32::GetConsoleWindow()
-if ($hwnd -ne [IntPtr]::Zero) {
-    # nCmdShow = 0 (Oculta o console sem fechar o processo)
-    $win32::ShowWindowAsync($hwnd, 0) | Out-Null
+# --- DEFINIÇÕES DE DIRETÓRIOS E COMPATIBILIDADE ---
+$InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
+$JsonPath = Join-Path $InstallDir "apps.json"
+$LocalScriptPath = Join-Path $InstallDir "main.ps1"
+$LocalVersionPath = Join-Path $InstallDir "version.txt"
+$ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
+
+# --- BOOTSTRAP: DESACOPLAMENTO DE PROCESSO (Roda no terminal do cliente) ---
+# Se o script estiver rodando sem caminho físico (IEX) ou não for Administrador:
+if (-not $PSCommandPath -or -not $isAdmin) {
+    # Garante a criação da pasta local
+    if (-not (Test-Path $InstallDir)) {
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    }
+
+    # Baixa silenciosamente a versão mais nova antes de disparar o processo independente
+    try {
+        $timestamp = Get-Date -Format "yyyyMMddHHmmss"
+        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate"; "Pragma" = "no-cache" }
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
+    }
+    catch {
+        # Fallback offline caso o cliente esteja sem internet
+    }
+
+    # Dispara um processo NOVO, SEPARADO e ELEVADO para rodar o utilitário
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`"" -Verb RunAs
+    
+    # Encerra o terminal atual do usuário imediatamente. O programa continuará rodando livre no novo processo.
+    Exit
 }
 
-# 2. SISTEMA DE LOGS PREVENTIVO (Definido logo no início para evitar travamentos de escopo)
+# --- EXECUÇÃO DO PROCESSO INDEPENDENTE (A partir daqui roda em background elevado) ---
+
+# Carrega as APIs nativas do Windows sem duplicar tipos (Evita erros ao rodar o script múltiplas vezes)
+if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32ConsoleUtils").Type) {
+    Add-Type -MemberDefinition @"
+    [DllImport("kernel32.dll")]
+    public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    "@ -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
+}
+
+# Oculta o console deste processo elevado em segundo plano
+$hwnd = [Win32.Win32ConsoleUtils]::GetConsoleWindow()
+if ($hwnd -ne [IntPtr]::Zero) {
+    [Win32.Win32ConsoleUtils]::ShowWindowAsync($hwnd, 0) | Out-Null
+}
+
+# Carrega as bibliotecas gráficas do .NET
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+# --- SISTEMA DE LOGS SEGURO ---
 $global:InitialLogs = @()
-$logTextBox = $null # Será associado mais tarde ao controle visual
+$logTextBox = $null
 
 function Write-Log ($Message) {
     $timestamp = Get-Date -Format "HH:mm:ss"
@@ -27,40 +70,9 @@ function Write-Log ($Message) {
             $logTextBox.AppendText($text)
         }
     } else {
-        # Se a interface gráfica ainda não existe, salva o log em cache temporário
         $global:InitialLogs += $text
-        Write-Host $text -ErrorAction SilentlyContinue
     }
 }
-
-# 3. VERIFICAÇÃO DE PRIVILÉGIOS ADMINISTRATIVOS
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    if ($PSCommandPath) {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
-    } else {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
-    }
-    Exit
-}
-
-# Carrega as bibliotecas gráficas do .NET
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-# --- DIRETÓRIOS E COMPATIBILIDADE ---
-$InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
-$JsonPath = Join-Path $InstallDir "apps.json"
-$LocalScriptPath = Join-Path $InstallDir "main.ps1"
-$LocalVersionPath = Join-Path $InstallDir "version.txt"
-$ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
-
-# Garante a criação da pasta local
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-}
-
-# --- FUNÇÕES OPERACIONAIS ---
 
 function Test-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
@@ -87,7 +99,7 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Sincroniza arquivos e configura o atalho
+# Verifica atualizações e cria o atalho localmente
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
@@ -106,13 +118,13 @@ function Install-LocalFilesAndShortcut {
         }
         
         if ($remoteSha -ne $localSha) {
-            Write-Log "Nova versão de arquivos detectada. Sincronizando repositório..."
+            Write-Log "Atualizando binários locais a partir do repositório..."
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
             $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
-            Write-Log "Arquivos locais sincronizados."
+            Write-Log "Atualização do utilitário aplicada com sucesso."
         } else {
-            Write-Log "Os arquivos do programa já estão atualizados."
+            Write-Log "O utilitário já se encontra na última versão estável."
         }
         
         if (-not (Test-Path $ShortcutPath)) {
@@ -123,7 +135,7 @@ function Install-LocalFilesAndShortcut {
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho 'FYXX Utility' atualizado na Área de Trabalho."
+            Write-Log "Atalho de Área de Trabalho gerado com sucesso."
         }
     }
     catch {
@@ -138,11 +150,10 @@ if (Test-Path $JsonPath) {
         $AppConfig = Get-Content $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
-        Write-Log "Iniciando recuperação de apps.json..."
+        Write-Log "Iniciando verificação de integridade do apps.json..."
     }
 }
 
-# Fallback se o arquivo estiver corrompido ou ausente no carregamento inicial
 if (-not $AppConfig) {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
@@ -151,18 +162,14 @@ if (-not $AppConfig) {
         $AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
     }
     catch {
-        # Lista local imutável em caso de erro crítico de conectividade
         $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
         $AppConfig = $DefaultApps | ConvertFrom-Json
         $DefaultApps | Out-File $JsonPath -Encoding utf8
     }
 }
 
-# Prevenção matemática contra falha catastrófica de dimensionamento do array
 if ($null -eq $AppConfig -or $AppConfig.Count -eq 0) {
-    $AppConfig = @(
-        @{ Name = "Discord"; ID = "Discord.Discord" }
-    )
+    $AppConfig = @( @{ Name = "Discord"; ID = "Discord.Discord" } )
 }
 
 # --- CONSTRUÇÃO DA INTERFACE GRÁFICA (GUI) ---
@@ -174,7 +181,7 @@ $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 
-# CRÍTICO: Força a criação do identificador de tela no Thread principal antes de qualquer processo concorrente
+# Força a criação do identificador de janela de imediato no thread visual principal
 $null = $form.Handle
 
 $titleLabel = New-Object System.Windows.Forms.Label
@@ -202,10 +209,10 @@ $logTextBox.BackColor = [System.Drawing.Color]::Black
 $logTextBox.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($logTextBox)
 
-# Descarrega com segurança todos os logs que ocorreram antes de a janela ser criada
+# Descarrega logs pré-inicialização com segurança
 if ($global:InitialLogs.Count -gt 0) {
     $logTextBox.AppendText([string]::Join("", $global:InitialLogs))
-    $global:InitialLogs = @() # Limpa o buffer de cache
+    $global:InitialLogs = @()
 }
 
 $tabControl = New-Object System.Windows.Forms.TabControl
@@ -213,7 +220,7 @@ $tabControl.Location = New-Object System.Drawing.Point(20, 80)
 $tabControl.Size = New-Object System.Drawing.Size(690, 320)
 $form.Controls.Add($tabControl)
 
-# --- CONFIGURAÇÃO DINÂMICA DE COLUNAS DOS CHECKBOXES ---
+# Configuração dinâmica de posições
 $colX = @(20, 240, 460)
 $startY = 20
 $rowSpacing = 28
@@ -327,7 +334,7 @@ $form.Add_Load({
     Write-Log "Iniciando verificação operacional..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        # Sincroniza os arquivos e gera o atalho persistente local
+        # Atualiza a instalação local de arquivos e gera o atalho na área de trabalho
         Install-LocalFilesAndShortcut
         
         if (Test-Winget) {
