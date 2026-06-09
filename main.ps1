@@ -1,21 +1,26 @@
-# Oculta o console do PowerShell imediatamente para manter apenas a interface visível
-$showWindowAsync = Add-Type -MemberDefinition @"
+# Carrega as APIs nativas do Windows para gerenciar o console em segundo plano de forma estável
+$win32 = Add-Type -MemberDefinition @"
+[DllImport("kernel32.dll")]
+public static extern IntPtr GetConsoleWindow();
 [DllImport("user32.dll")]
 public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-"@ -Name "Win32ShowWindowAsync" -Namespace "Win32" -PassThru
+"@ -Name "Win32ConsoleUtils" -Namespace "Win32" -PassThru
 
-$hwnd = (Get-Process -Id $PID).MainWindowHandle
+# Captura e oculta o terminal de forma limpa, mantendo o processo vivo em segundo plano
+$hwnd = $win32::GetConsoleWindow()
 if ($hwnd -ne [IntPtr]::Zero) {
-    $showWindowAsync::ShowWindowAsync($hwnd, 0) | Out-Null
+    # nCmdShow = 0 (Oculta o console sem fechar o processo)
+    $win32::ShowWindowAsync($hwnd, 0) | Out-Null
 }
 
 # Garante privilégios de Administrador de acordo com o ambiente (IEX ou Local)
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     if ($PSCommandPath) {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     } else {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
+        # Executa sem WindowStyle Hidden para que as APIs gráficas do Windows se associem de forma estável
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
     }
     Exit
 }
@@ -28,6 +33,7 @@ Add-Type -AssemblyName System.Drawing
 $InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
 $JsonPath = Join-Path $InstallDir "apps.json"
 $LocalScriptPath = Join-Path $InstallDir "main.ps1"
+$LocalVersionPath = Join-Path $InstallDir "version.txt"
 $ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
 
 # Garante a criação da pasta local
@@ -66,20 +72,42 @@ function Set-EdgeGoogleDefault {
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
-        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate"; "Pragma" = "no-cache" }
+        $headers = @{ 
+            "Cache-Control" = "no-cache, no-store, must-revalidate"
+            "Pragma"        = "no-cache"
+            "User-Agent"    = "FYXX-Utility-Updater"
+        }
         
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
+        # Consulta a assinatura do último commit no GitHub
+        $ApiUrl = "https://api.github.com/repos/ogerrva/winfyxx/commits/main"
+        $remoteSha = (Invoke-RestMethod -Uri $ApiUrl -Headers $headers -ErrorAction Stop).sha
+        
+        # Compara com a versão local existente
+        $localSha = ""
+        if (Test-Path $LocalVersionPath) {
+            $localSha = Get-Content $LocalVersionPath -Raw
+        }
+        
+        if ($remoteSha -ne $localSha) {
+            Write-Log "Nova versão detectada no repositório. Sincronizando..."
+            Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
+            Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
+            $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
+            Write-Log "Arquivos locais atualizados com sucesso."
+        } else {
+            Write-Log "O programa já está na versão mais recente."
+        }
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
+            # O atalho local executa sem janela de comando visível
             $Shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho local atualizado com sucesso na Área de Trabalho."
+            Write-Log "Atalho 'FYXX Utility' atualizado na Área de Trabalho."
         }
     }
     catch {
@@ -107,7 +135,6 @@ if (-not $AppConfig) {
         $AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
     }
     catch {
-        # Lista unificada padrão embutida na memória para prevenir falha offline
         $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
         $AppConfig = $DefaultApps | ConvertFrom-Json
         $DefaultApps | Out-File $JsonPath -Encoding utf8
@@ -122,6 +149,9 @@ $form.Size = New-Object System.Drawing.Size(750, 600)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
+
+# CRÍTICO: Força o Windows a registrar o identificador único (Handle) da janela no thread principal de imediato
+$null = $form.Handle
 
 $titleLabel = New-Object System.Windows.Forms.Label
 $titleLabel.Text = "Gerenciador de Programas"
@@ -148,6 +178,7 @@ $logTextBox.BackColor = [System.Drawing.Color]::Black
 $logTextBox.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($logTextBox)
 
+# Função de Log Thread-Safe (Garante a escrita concorrente estável das Threads)
 function Write-Log ($Message) {
     $timestamp = Get-Date -Format "HH:mm:ss"
     $text = "[$timestamp] $Message`r`n"
@@ -167,7 +198,6 @@ $form.Controls.Add($tabControl)
 $colX = @(20, 240, 460)
 $startY = 20
 $rowSpacing = 28
-# Distribui proporcionalmente os programas entre 3 colunas
 $itemsPerColumn = [math]::Ceiling($AppConfig.Count / 3)
 
 # --- ABA 1: INSTALAÇÃO ---
@@ -277,7 +307,7 @@ $form.Add_Load({
     Write-Log "Iniciando verificação operacional..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        # Sincroniza arquivos e atualiza o atalho na Área de Trabalho
+        # Sincroniza os arquivos e gera o atalho persistente local
         Install-LocalFilesAndShortcut
         
         if (Test-Winget) {
