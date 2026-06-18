@@ -9,14 +9,11 @@ $LocalVersionPath = Join-Path $InstallDir "version.txt"
 $ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
 
 # --- BOOTSTRAP: DESACOPLAMENTO DE PROCESSO (Roda no terminal do cliente) ---
-# Se o script estiver rodando sem caminho físico (IEX) ou não for Administrador:
 if (-not $PSCommandPath -or -not $isAdmin) {
-    # Garante a criação da pasta local
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
-    # Baixa silenciosamente a versão mais nova antes de disparar o processo independente
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
         $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate"; "Pragma" = "no-cache" }
@@ -24,29 +21,21 @@ if (-not $PSCommandPath -or -not $isAdmin) {
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
     }
     catch {
-        # Fallback offline caso o cliente esteja sem internet
+        # Fallback offline
     }
 
-    # Dispara um processo NOVO, SEPARADO e ELEVADO para rodar o utilitário
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`"" -Verb RunAs
-    
-    # Encerra o terminal atual do usuário imediatamente. O programa continuará rodando livre no novo processo.
     Exit
 }
 
-# --- EXECUÇÃO DO PROCESSO INDEPENDENTE (A partir daqui roda em background elevado) ---
+# --- EXECUÇÃO DO PROCESSO INDEPENDENTE ---
 
-# Carrega as APIs nativas do Windows sem duplicar tipos (Evita erros ao rodar o script múltiplas vezes)
+# Carrega APIs sem sensibilidade de formatação ou de espaço de linha (sem here-strings)
 if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32ConsoleUtils").Type) {
-    Add-Type -MemberDefinition @"
-    [DllImport("kernel32.dll")]
-    public static extern IntPtr GetConsoleWindow();
-    [DllImport("user32.dll")]
-    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-    "@ -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
+    $MemberDef = '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
+    Add-Type -MemberDefinition $MemberDef -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
 }
 
-# Oculta o console deste processo elevado em segundo plano
 $hwnd = [Win32.Win32ConsoleUtils]::GetConsoleWindow()
 if ($hwnd -ne [IntPtr]::Zero) {
     [Win32.Win32ConsoleUtils]::ShowWindowAsync($hwnd, 0) | Out-Null
@@ -99,7 +88,7 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Verifica atualizações e cria o atalho localmente
+# Sincroniza arquivos e configura o atalho
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
@@ -334,7 +323,7 @@ $form.Add_Load({
     Write-Log "Iniciando verificação operacional..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        # Atualiza a instalação local de arquivos e gera o atalho na área de trabalho
+        # Sincroniza os arquivos e gera o atalho persistente local
         Install-LocalFilesAndShortcut
         
         if (Test-Winget) {
