@@ -1,77 +1,53 @@
-# 1. Carrega as bibliotecas do .NET antes de qualquer outra instrução (SUGESTÃO DO USUÁRIO)
-Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+# --- 1. VERIFICAÇÃO DE ADMINISTRADOR ---
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
-# 2. SISTEMA DE TRAP DE ERROS (SUGESTÃO DO USUÁRIO)
-$ErrorActionPreference = "Stop"
-trap {
-    [System.Windows.Forms.MessageBox]::Show($_.Exception.ToString(), "Erro Crítico de Execução")
+if (-not $isAdmin) {
+    Write-Host "O programa precisa de permissao de Administrador. Reiniciando..." -ForegroundColor Yellow
+    if ($PSCommandPath) {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    } else {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'win.fyxx.com.br?t=$(Get-Date -Format yyyyMMddHHmmss)' | iex`"" -Verb RunAs
+    }
     Exit
 }
 
-# Carrega as APIs nativas do Windows de forma segura
-if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32ConsoleUtils").Type) {
-    $MemberDef = '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
-    Add-Type -MemberDefinition $MemberDef -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
-}
+# --- 2. CARREGAMENTO DE BIBLIOTECAS GRÁFICAS ---
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
-# --- DETERMINA SE ESTÁ RODANDO COMO ADMIN ---
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
-# --- DEFINIÇÕES DE DIRETÓRIOS ---
+# --- 3. DEFINIÇÃO DE DIRETÓRIOS ---
 $InstallDir = Join-Path $env:LOCALAPPDATA "FYXX"
 $JsonPath = Join-Path $InstallDir "apps.json"
 $LocalScriptPath = Join-Path $InstallDir "main.ps1"
-$LocalVersionPath = Join-Path $InstallDir "version.txt"
 $ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
 
-# --- BOOTSTRAP: DESACOPLAMENTO E ELEVAÇÃO ---
-if (-not $PSCommandPath -or -not $isAdmin) {
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
-
-    try {
-        $timestamp = Get-Date -Format "yyyyMMddHHmmss"
-        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate"; "Pragma" = "no-cache" }
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
-    }
-    catch {
-        # Fallback offline
-    }
-
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`"" -Verb RunAs
-    Exit
+if (-not (Test-Path $InstallDir)) {
+    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 }
 
-# --- EXECUÇÃO DO PROCESSO INDEPENDENTE ---
-
-# Oculta o console próprio deste processo elevado em segundo plano
-$hwnd = [Win32.Win32ConsoleUtils]::GetConsoleWindow()
-if ($hwnd -ne [IntPtr]::Zero) {
-    [Win32.Win32ConsoleUtils]::ShowWindowAsync($hwnd, 0) | Out-Null
-}
-
-# --- SISTEMA DE LOGS SEGURO SEM DELEGATES DE PARÂMETROS (SUGESTÃO DO USUÁRIO) ---
-$global:InitialLogs = @()
+# --- 4. FUNÇÃO DE LOG (Escreve no Terminal e na Interface) ---
 $logTextBox = $null
 
 function Write-Log ($Message) {
     $timestamp = Get-Date -Format "HH:mm:ss"
     $text = "[$timestamp] $Message`r`n"
+    
+    # Imprime no terminal obrigatoriamente
+    Write-Host "[$timestamp] $Message" -ForegroundColor Cyan
+
     if ($null -ne $logTextBox) {
         if ($form.InvokeRequired) {
-            # Simplificado radicalmente: usa o escopo léxico natural do PowerShell
-            $form.Invoke([action]{ $logTextBox.AppendText($text) })
+            $form.Invoke([System.Action[string]]{
+                param($str)
+                $logTextBox.AppendText($str)
+            }, $text)
         } else {
             $logTextBox.AppendText($text)
         }
-    } else {
-        $global:InitialLogs += $text
     }
 }
 
+# --- 5. FUNÇÕES AUXILIARES ---
 function Test-Winget {
     return [bool](Get-Command winget -ErrorAction SilentlyContinue)
 }
@@ -79,9 +55,7 @@ function Test-Winget {
 function Set-EdgeGoogleDefault {
     $EdgePath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
     try {
-        if (-not (Test-Path $EdgePath)) {
-            New-Item -Path $EdgePath -Force | Out-Null
-        }
+        if (-not (Test-Path $EdgePath)) { New-Item -Path $EdgePath -Force | Out-Null }
         Set-ItemProperty -Path $EdgePath -Name 'RestoreOnStartup' -Value 4 -Type DWord -Force
         Set-ItemProperty -Path $EdgePath -Name 'RestoreOnStartupURLs' -Value @('https://www.google.com') -Type MultiString -Force
         Set-ItemProperty -Path $EdgePath -Name 'NewTabPageLocation' -Value 'https://www.google.com' -Type String -Force
@@ -93,107 +67,55 @@ function Set-EdgeGoogleDefault {
         return $true
     }
     catch {
+        Write-Log "Erro Edge Tweak: $_"
         return $false
     }
 }
 
-# Sincroniza arquivos protegendo contra bloqueio de arquivo (IOException)
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
-        $headers = @{ 
-            "Cache-Control" = "no-cache, no-store, must-revalidate"
-            "Pragma"        = "no-cache"
-            "User-Agent"    = "FYXX-Utility-Updater"
-        }
-        
-        $ApiUrl = "https://api.github.com/repos/ogerrva/winfyxx/commits/main"
-        $remoteSha = ""
-        try {
-            $remoteSha = (Invoke-RestMethod -Uri $ApiUrl -Headers $headers -ErrorAction Stop).sha
-        }
-        catch {
-            Write-Log "Aviso: Falha ao checar atualizações com o GitHub."
-        }
-        
-        $localSha = ""
-        if (Test-Path $LocalVersionPath) {
-            $localSha = Get-Content $LocalVersionPath -Raw
-        }
-        
-        if ($null -ne $remoteSha -and $remoteSha -ne "" -and $remoteSha -ne $localSha) {
-            Write-Log "Atualizando binários locais a partir do repositório..."
-            
-            # Tenta gravar de forma segura protegendo de bloqueios de leitura de arquivo em execução
-            try {
-                Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath -ErrorAction Stop
-                Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath -ErrorAction Stop
-                $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
-                Write-Log "Atualização aplicada com sucesso."
-            }
-            catch {
-                Write-Log "Nota: O arquivo local está em execução e não pôde ser substituído agora."
-            }
-        } else {
-            Write-Log "O utilitário local já está na versão mais recente."
-        }
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -OutFile $LocalScriptPath -ErrorAction Stop
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -OutFile $JsonPath -ErrorAction Stop
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
+            # ATALHO AGORA MANTÉM O TERMINAL ABERTO! (Sem -WindowStyle Hidden)
             $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho de Área de Trabalho gerado com sucesso."
+            Write-Log "Atalho de Área de Trabalho gerado."
         }
     }
     catch {
-        Write-Log "Aviso: Conectividade offline detectada."
+        Write-Log "Aviso: Nao foi possivel baixar os arquivos do GitHub."
     }
 }
 
-# --- CARREGAMENTO RESILIENTE DO JSON ---
+# --- 6. CARREGA O JSON ---
 $AppConfig = $null
-if (Test-Path $JsonPath) {
-    try {
-        $AppConfig = Get-Content $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+try {
+    if (-not (Test-Path $JsonPath)) {
+        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$(Get-Date -Format yyyyMMddHHmmss)" -OutFile $JsonPath -ErrorAction Stop
     }
-    catch {
-        Write-Log "Verificando integridade dos pacotes..."
-    }
+    $AppConfig = Get-Content $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+}
+catch {
+    Write-Log "Usando lista padrao da memoria..."
+    $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
+    $AppConfig = $DefaultApps | ConvertFrom-Json
 }
 
-if (-not $AppConfig) {
-    try {
-        $timestamp = Get-Date -Format "yyyyMMddHHmmss"
-        $headers = @{ "Cache-Control" = "no-cache, no-store, must-revalidate" }
-        Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
-        $AppConfig = Get-Content $JsonPath -Raw | ConvertFrom-Json
-    }
-    catch {
-        $DefaultApps = '[{"Name":"Discord","ID":"Discord.Discord"},{"Name":"Epic Games","ID":"EpicGames.EpicGamesLauncher"},{"Name":"WinRAR","ID":"RARLab.WinRAR"},{"Name":"EA Play","ID":"ElectronicArts.EADesktop"},{"Name":"Ubisoft Connect","ID":"Ubisoft.Connect"},{"Name":"Terminus SSH","ID":"Termius.Termius"},{"Name":"FileZilla","ID":"FileZilla.FileZillaClient"},{"Name":"Brave Browser","ID":"BraveSoftware.BraveBrowser"},{"Name":"Telegram","ID":"Telegram.TelegramDesktop"},{"Name":"VSCode","ID":"Microsoft.VisualStudioCode"},{"Name":"VLC","ID":"VideoLAN.VLC"},{"Name":"CPU-Z","ID":"CPUID.CPU-Z"},{"Name":"Chrome","ID":"Google.Chrome"},{"Name":"Firefox","ID":"Mozilla.Firefox"},{"Name":"Edge","ID":"Microsoft.Edge"},{"Name":"Opera","ID":"Opera.Opera"},{"Name":"GeForce Experience","ID":"Nvidia.GeForceExperience"}]'
-        $AppConfig = $DefaultApps | ConvertFrom-Json
-        $DefaultApps | Out-File $JsonPath -Encoding utf8
-    }
-}
-
-if ($null -eq $AppConfig -or $AppConfig.Count -eq 0) {
-    $AppConfig = @( @{ Name = "Discord"; ID = "Discord.Discord" } )
-}
-
-# --- CONSTRUÇÃO DA INTERFACE GRÁFICA (GUI) ---
-
+# --- 7. CONSTRUÇÃO DA INTERFACE (GUI) ---
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "Gerenciador de Programas & Sistema - By OGERRVA"
 $form.Size = New-Object System.Drawing.Size(750, 600)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
-
-# Força a criação do identificador de janela de imediato
-$null = $form.Handle
 
 $titleLabel = New-Object System.Windows.Forms.Label
 $titleLabel.Text = "Gerenciador de Programas"
@@ -220,25 +142,18 @@ $logTextBox.BackColor = [System.Drawing.Color]::Black
 $logTextBox.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($logTextBox)
 
-# Descarrega logs pré-inicialização com segurança
-if ($global:InitialLogs.Count -gt 0) {
-    $logTextBox.AppendText([string]::Join("", $global:InitialLogs))
-    $global:InitialLogs = @()
-}
-
 $tabControl = New-Object System.Windows.Forms.TabControl
 $tabControl.Location = New-Object System.Drawing.Point(20, 80)
 $tabControl.Size = New-Object System.Drawing.Size(690, 320)
 $form.Controls.Add($tabControl)
 
-# Configuração dinâmica de posições
 $colX = @(20, 240, 460)
 $startY = 20
 $rowSpacing = 28
 $itemsPerColumn = [math]::Ceiling($AppConfig.Count / 3)
 if ($itemsPerColumn -lt 1) { $itemsPerColumn = 1 }
 
-# --- ABA 1: INSTALAÇÃO ---
+# ABA 1: INSTALAÇÃO
 $tabInstall = New-Object System.Windows.Forms.TabPage
 $tabInstall.Text = "Instalação"
 $tabControl.Controls.Add($tabInstall)
@@ -247,7 +162,6 @@ $installCheckboxes = @()
 for ($i = 0; $i -lt $AppConfig.Count; $i++) {
     $colIndex = [math]::Floor($i / $itemsPerColumn)
     $rowIndex = $i % $itemsPerColumn
-    
     $cb = New-Object System.Windows.Forms.CheckBox
     $cb.Text = $AppConfig[$i].Name
     $cb.Tag = $AppConfig[$i].ID
@@ -263,14 +177,7 @@ $btnInstallSelected.Location = New-Object System.Drawing.Point(20, 240)
 $btnInstallSelected.Size = New-Object System.Drawing.Size(180, 30)
 $tabInstall.Controls.Add($btnInstallSelected)
 
-$btnCustomInstall = New-Object System.Windows.Forms.Button
-$btnCustomInstall.Text = "Pesquisa e Instal. Personalizada"
-$btnCustomInstall.Location = New-Object System.Drawing.Point(220, 240)
-$btnCustomInstall.Size = New-Object System.Drawing.Size(220, 30)
-$tabInstall.Controls.Add($btnCustomInstall)
-
-
-# --- ABA 2: DESINSTALAÇÃO ---
+# ABA 2: DESINSTALAÇÃO
 $tabUninstall = New-Object System.Windows.Forms.TabPage
 $tabUninstall.Text = "Desinstalação"
 $tabControl.Controls.Add($tabUninstall)
@@ -279,7 +186,6 @@ $uninstallCheckboxes = @()
 for ($i = 0; $i -lt $AppConfig.Count; $i++) {
     $colIndex = [math]::Floor($i / $itemsPerColumn)
     $rowIndex = $i % $itemsPerColumn
-    
     $cb = New-Object System.Windows.Forms.CheckBox
     $cb.Text = $AppConfig[$i].Name
     $cb.Tag = $AppConfig[$i].ID
@@ -295,14 +201,7 @@ $btnUninstallSelected.Location = New-Object System.Drawing.Point(20, 240)
 $btnUninstallSelected.Size = New-Object System.Drawing.Size(180, 30)
 $tabUninstall.Controls.Add($btnUninstallSelected)
 
-$btnListInstalled = New-Object System.Windows.Forms.Button
-$btnListInstalled.Text = "Listar Todos no Sistema"
-$btnListInstalled.Location = New-Object System.Drawing.Point(220, 240)
-$btnListInstalled.Size = New-Object System.Drawing.Size(200, 30)
-$tabUninstall.Controls.Add($btnListInstalled)
-
-
-# --- ABA 3: SISTEMA & AJUSTES ---
+# ABA 3: SISTEMA
 $tabSystem = New-Object System.Windows.Forms.TabPage
 $tabSystem.Text = "Sistema & Ajustes"
 $tabControl.Controls.Add($tabSystem)
@@ -319,8 +218,7 @@ $btnUpgradeAll.Location = New-Object System.Drawing.Point(20, 70)
 $btnUpgradeAll.Size = New-Object System.Drawing.Size(350, 35)
 $tabSystem.Controls.Add($btnUpgradeAll)
 
-
-# --- ABA 4: ATIVAÇÃO ---
+# ABA 4: ATIVAÇÃO
 $tabActivation = New-Object System.Windows.Forms.TabPage
 $tabActivation.Text = "Licenciamento"
 $tabControl.Controls.Add($tabActivation)
@@ -333,94 +231,37 @@ $lblStatus.Size = New-Object System.Drawing.Size(400, 25)
 $tabActivation.Controls.Add($lblStatus)
 
 $btnAutoActivate = New-Object System.Windows.Forms.Button
-$btnAutoActivate.Text = "Verificar Licença do Windows"
+$btnAutoActivate.Text = "Ativar Windows"
 $btnAutoActivate.Location = New-Object System.Drawing.Point(20, 70)
 $btnAutoActivate.Size = New-Object System.Drawing.Size(250, 35)
 $tabActivation.Controls.Add($btnAutoActivate)
 
-
-# --- LÓGICA DE EXECUÇÃO ASSÍNCRONA ---
+# --- 8. LÓGICA E EVENTOS ---
 
 $form.Add_Load({
-    Write-Log "Iniciando verificação operacional..."
-    
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         try {
             Install-LocalFilesAndShortcut
             
-            $wingetReady = Test-Winget
-            if ($wingetReady) {
-                Write-Log "Gerenciador de pacotes Winget pronto."
-            } else {
-                Write-Log "Aviso: Winget ausente no sistema."
-            }
+            if (Test-Winget) { Write-Log "Winget pronto." } else { Write-Log "Winget ausente." }
             
             $status = "Não Ativado"
             $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-            if ($check -match "permanente|permanent|ativado|activated") {
-                $status = "Ativado"
-            }
+            if ($check -match "permanente|permanent|ativado|activated") { $status = "Ativado" }
             
-            # Passando o parâmetro de forma limpa pelo Invoke
-            $form.Invoke(
-                [Action[string]]{
-                    param($s)
-                    $lblStatus.Text = "Status do Windows: $s"
-                    Write-Log "Licenciamento verificado: $s"
-                },
-                $status
-            )
+            $form.Invoke([System.Action[string]]{
+                param($s)
+                $lblStatus.Text = "Status do Windows: $s"
+            }, $status)
         }
-        catch {
-            Write-Log "Erro de inicialização em segundo plano: $_"
-        }
-    }) | Out-Null
-})
-
-$btnAutoActivate.Add_Click({
-    $btnAutoActivate.Enabled = $false
-    Write-Log "Consultando estado de licenciamento do Windows..."
-    
-    [System.Threading.ThreadPool]::QueueUserWorkItem({
-        try {
-            $check = cscript //nologo C:\Windows\System32\slmgr.vbs /dli
-            foreach ($line in $check) {
-                if (-not [string]::IsNullOrWhiteSpace($line)) {
-                    Write-Log $line.Trim()
-                }
-            }
-            
-            $status = "Não Ativado"
-            $checkXpr = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-            if ($checkXpr -match "permanente|permanent|ativado|activated") {
-                $status = "Ativado"
-            }
-            
-            $form.Invoke(
-                [Action[string]]{
-                    param($s)
-                    $lblStatus.Text = "Status do Windows: $s"
-                    $btnAutoActivate.Enabled = $true
-                },
-                $status
-            )
-        }
-        catch {
-            Write-Log "Erro ao verificar licença: $_"
-            $form.Invoke([Action]{ $btnAutoActivate.Enabled = $true })
-        }
+        catch { Write-Log "Erro no Load: $_" }
     }) | Out-Null
 })
 
 $btnInstallSelected.Add_Click({
     $selected = $installCheckboxes | Where-Object { $_.Checked -eq $true }
-    if ($selected.Count -eq 0) {
-        Write-Log "Selecione ao menos um programa."
-        return
-    }
-    
+    if ($selected.Count -eq 0) { return }
     $btnInstallSelected.Enabled = $false
-    Write-Log "Instalações iniciadas em segundo plano..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         try {
@@ -428,35 +269,20 @@ $btnInstallSelected.Add_Click({
                 $name = $cb.Text
                 $id = $cb.Tag
                 Write-Log "Instalando: $name..."
-                
+                # O comando start-process roda oculto no terminal, mas a janela principal do PS fica aberta.
                 $proc = Start-Process winget -ArgumentList "install --id $id --silent --accept-source-agreements --accept-package-agreements" -NoNewWindow -PassThru -Wait
-                
-                if ($proc.ExitCode -eq 0) {
-                    Write-Log "Concluído: $name foi instalado com sucesso."
-                } else {
-                    Write-Log "Não foi possível concluir a instalação de: $name. Código: $($proc.ExitCode)"
-                }
+                if ($proc.ExitCode -eq 0) { Write-Log "Sucesso: $name" } else { Write-Log "Erro ao instalar: $name" }
             }
-            Write-Log "Processos de instalação finalizados."
         }
-        catch {
-            Write-Log "Erro de instalação: $_"
-        }
-        finally {
-            $form.Invoke([Action]{ $btnInstallSelected.Enabled = $true })
-        }
+        catch { Write-Log "Erro de instalacao: $_" }
+        finally { $form.Invoke([System.Action]{ $btnInstallSelected.Enabled = $true }) }
     }) | Out-Null
 })
 
 $btnUninstallSelected.Add_Click({
     $selected = $uninstallCheckboxes | Where-Object { $_.Checked -eq $true }
-    if ($selected.Count -eq 0) {
-        Write-Log "Selecione ao menos um programa."
-        return
-    }
-    
+    if ($selected.Count -eq 0) { return }
     $btnUninstallSelected.Enabled = $false
-    Write-Log "Desinstalações iniciadas em segundo plano..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         try {
@@ -464,131 +290,79 @@ $btnUninstallSelected.Add_Click({
                 $name = $cb.Text
                 $id = $cb.Tag
                 Write-Log "Removendo: $name..."
-                
                 $proc = Start-Process winget -ArgumentList "uninstall --id $id --silent" -NoNewWindow -PassThru -Wait
+                if ($proc.ExitCode -eq 0) { Write-Log "Sucesso: $name removido." } else { Write-Log "Erro ao remover: $name" }
+            }
+        }
+        catch { Write-Log "Erro de desinstalacao: $_" }
+        finally { $form.Invoke([System.Action]{ $btnUninstallSelected.Enabled = $true }) }
+    }) | Out-Null
+})
+
+$btnAutoActivate.Add_Click({
+    $btnAutoActivate.Enabled = $false
+    Write-Log "Iniciando ativacao silenciosa..."
+    
+    [System.Threading.ThreadPool]::QueueUserWorkItem({
+        try {
+            $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
+            if ($check -match "permanente|permanent|ativado|activated") {
+                Write-Log "O Windows ja esta ativado."
+                $form.Invoke([System.Action]{ $btnAutoActivate.Enabled = $true })
+                return
+            }
+            
+            Write-Log "Aplicando chave..."
+            Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /ipk W269N-WFGWX-YVC9B-4J6C9-T83GX" -NoNewWindow -Wait
+            
+            $KMS_Servers = @("kms.loli.best", "zh.us.to", "kms.digiboy.ir", "kms.msguides.com")
+            $success = $false
+            
+            foreach ($server in $KMS_Servers) {
+                Write-Log "Tentando KMS: $server..."
+                Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /skms $server" -NoNewWindow -Wait
+                Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /ato" -NoNewWindow -Wait
                 
-                if ($proc.ExitCode -eq 0) {
-                    Write-Log "Concluído: $name foi removido."
-                } else {
-                    Write-Log "Não foi possível remover: $name."
+                $checkStatus = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
+                if ($checkStatus -match "permanente|permanent|ativado|activated") {
+                    $success = $true
+                    Write-Log "Ativado com sucesso via: $server"
+                    break
                 }
             }
-            Write-Log "Processos de remoção finalizados."
+            
+            $newStatus = if ($success) { "Ativado" } else { "Não Ativado" }
+            $form.Invoke([System.Action[string]]{
+                param($s)
+                $lblStatus.Text = "Status do Windows: $s"
+                $btnAutoActivate.Enabled = $true
+            }, $newStatus)
         }
-        catch {
-            Write-Log "Erro de desinstalação: $_"
-        }
-        finally {
-            $form.Invoke([Action]{ $btnUninstallSelected.Enabled = $true })
-        }
+        catch { Write-Log "Erro na ativacao: $_"; $form.Invoke([System.Action]{ $btnAutoActivate.Enabled = $true }) }
     }) | Out-Null
 })
 
 $btnUpgradeAll.Add_Click({
     $btnUpgradeAll.Enabled = $false
-    Write-Log "Iniciando atualização de softwares instalados..."
-    
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         try {
-            $proc = Start-Process winget -ArgumentList "upgrade --all --silent" -NoNewWindow -PassThru -Wait
-            Write-Log "Processo de atualizações globais finalizado."
+            Write-Log "Atualizando todos..."
+            Start-Process winget -ArgumentList "upgrade --all --silent" -NoNewWindow -Wait
+            Write-Log "Atualizacao concluida."
         }
-        catch {
-            Write-Log "Erro ao atualizar programas: $_"
-        }
-        finally {
-            $form.Invoke([Action]{ $btnUpgradeAll.Enabled = $true })
-        }
-    }) | Out-Null
-})
-
-$btnListInstalled.Add_Click({
-    Write-Log "Consultando softwares locais..."
-    
-    [System.Threading.ThreadPool]::QueueUserWorkItem({
-        try {
-            $list = winget list
-            foreach ($line in $list) {
-                Write-Log $line
-            }
-            Write-Log "Fim da lista de softwares locais."
-        }
-        catch {
-            Write-Log "Erro ao listar instalados: $_"
-        }
+        catch { Write-Log "Erro: $_" }
+        finally { $form.Invoke([System.Action]{ $btnUpgradeAll.Enabled = $true }) }
     }) | Out-Null
 })
 
 $btnEdgeTweak.Add_Click({
-    Write-Log "Iniciando aplicação de diretivas no Edge..."
-    
     [System.Threading.ThreadPool]::QueueUserWorkItem({
         try {
-            $res = Set-EdgeGoogleDefault
-            if ($res) {
-                Write-Log "O Google foi configurado com sucesso como padrão no Edge."
-            } else {
-                Write-Log "Erro ao tentar salvar as chaves no registro."
-            }
+            if (Set-EdgeGoogleDefault) { Write-Log "Edge atualizado para Google." }
         }
-        catch {
-            Write-Log "Erro ao aplicar políticas do Edge: $_"
-        }
+        catch { Write-Log "Erro Edge: $_" }
     }) | Out-Null
 })
 
-$btnCustomInstall.Add_Click({
-    $inputBox = New-Object System.Windows.Forms.Form
-    $inputBox.Text = "Pesquisa Customizada"
-    $inputBox.Size = New-Object System.Drawing.Size(400, 150)
-    $inputBox.StartPosition = "CenterParent"
-    $inputBox.FormBorderStyle = "FixedDialog"
-    $inputBox.MaximizeBox = $false
-    
-    $lblPrompt = New-Object System.Windows.Forms.Label
-    $lblPrompt.Text = "Digite o nome do programa a ser pesquisado:"
-    $lblPrompt.Location = New-Object System.Drawing.Point(20, 15)
-    $lblPrompt.Size = New-Object System.Drawing.Size(350, 20)
-    $inputBox.Controls.Add($lblPrompt)
-    
-    $txtInput = New-Object System.Windows.Forms.TextBox
-    $txtInput.Location = New-Object System.Drawing.Point(20, 40)
-    $txtInput.Size = New-Object System.Drawing.Size(340, 20)
-    $inputBox.Controls.Add($txtInput)
-    
-    $btnOk = New-Object System.Windows.Forms.Button
-    $btnOk.Text = "Pesquisar"
-    $btnOk.Location = New-Object System.Drawing.Point(20, 75)
-    $btnOk.Size = New-Object System.Drawing.Size(100, 25)
-    $inputBox.Controls.Add($btnOk)
-    
-    $btnOk.Add_Click({
-        $progName = $txtInput.Text
-        if (-not [string]::IsNullOrEmpty($progName)) {
-            Write-Log "Buscando por: '$progName' no catálogo..."
-            
-            [System.Threading.ThreadPool]::QueueUserWorkItem({
-                try {
-                    $results = winget search --name $progName
-                    foreach ($line in $results) {
-                        Write-Log $line
-                    }
-                }
-                catch {
-                    Write-Log "Erro na pesquisa customizada: $_"
-                }
-            }) | Out-Null
-            $inputBox.Close()
-        }
-    })
-    $inputBox.ShowDialog() | Out-Null
-})
-
-# --- 3. CONTROLE DE ENCERRAMENTO PARA VERIFICAÇÃO (SUGESTÃO DO USUÁRIO) ---
-$form.Add_FormClosing({
-    param($sender, $e)
-    [System.Windows.Forms.MessageBox]::Show("FormClosing disparado. Loop de eventos encerrado.", "DEBUG")
-})
-
-# --- 3. EXECUTAR EM LOOP MODAL INDEPENDENTE (SUGESTÃO DO USUÁRIO) ---
-$form.ShowDialog()
+# --- 9. EXECUTAR A JANELA ---
+[void]$form.ShowDialog()
