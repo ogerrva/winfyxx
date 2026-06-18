@@ -1,3 +1,16 @@
+# --- 4. TRATAMENTO GLOBAL DE EXCEÇÕES (SUGESTÃO 4) ---
+$ErrorActionPreference = "Stop"
+trap {
+    [System.Windows.Forms.MessageBox]::Show($_.Exception.ToString(), "Erro Crítico de Execução")
+    Exit
+}
+
+# Carrega as APIs nativas do Windows de forma segura (sem herestrings para evitar quebra de indentação)
+if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32ConsoleUtils").Type) {
+    $MemberDef = '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
+    Add-Type -MemberDefinition $MemberDef -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
+}
+
 # --- DETERMINA SE ESTÁ RODANDO COMO ADMIN ---
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -8,7 +21,7 @@ $LocalScriptPath = Join-Path $InstallDir "main.ps1"
 $LocalVersionPath = Join-Path $InstallDir "version.txt"
 $ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
 
-# --- BOOTSTRAP: DESACOPLAMENTO E ELEVAÇÃO (Mantém o console aberto) ---
+# --- BOOTSTRAP: DESACOPLAMENTO E ELEVAÇÃO ---
 if (-not $PSCommandPath -or -not $isAdmin) {
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -21,10 +34,9 @@ if (-not $PSCommandPath -or -not $isAdmin) {
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
     }
     catch {
-        # Fallback silencioso offline
+        # Fallback offline
     }
 
-    # Inicia um novo processo do PowerShell visível e elevado
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`"" -Verb RunAs
     Exit
 }
@@ -33,7 +45,7 @@ if (-not $PSCommandPath -or -not $isAdmin) {
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# --- SISTEMA DE LOGS SEGURO ---
+# --- SISTEMA DE LOGS SEGURO (SUGESTÃO 3 E 7) ---
 $global:InitialLogs = @()
 $logTextBox = $null
 
@@ -42,7 +54,14 @@ function Write-Log ($Message) {
     $text = "[$timestamp] $Message`r`n"
     if ($null -ne $logTextBox) {
         if ($form.InvokeRequired) {
-            $form.Invoke([Action[string]]{ $logTextBox.AppendText($args[0]) }, $text)
+            # Evita o uso problemático de $args[0] passando um parâmetro fortemente nomeado
+            $form.Invoke(
+                [Action[string]]{
+                    param($msg)
+                    $logTextBox.AppendText($msg)
+                },
+                $text
+            )
         } else {
             $logTextBox.AppendText($text)
         }
@@ -76,7 +95,7 @@ function Set-EdgeGoogleDefault {
     }
 }
 
-# Sincroniza arquivos e configura o atalho
+# Sincroniza arquivos e configura o atalho (SUGESTÃO 5)
 function Install-LocalFilesAndShortcut {
     try {
         $timestamp = Get-Date -Format "yyyyMMddHHmmss"
@@ -87,37 +106,44 @@ function Install-LocalFilesAndShortcut {
         }
         
         $ApiUrl = "https://api.github.com/repos/ogerrva/winfyxx/commits/main"
-        $remoteSha = (Invoke-RestMethod -Uri $ApiUrl -Headers $headers -ErrorAction Stop).sha
+        
+        # Proteção contra erros de rede/taxa limite da API do GitHub
+        $remoteSha = ""
+        try {
+            $remoteSha = (Invoke-RestMethod -Uri $ApiUrl -Headers $headers -ErrorAction Stop).sha
+        }
+        catch {
+            Write-Log "Aviso: Falha ao consultar API do GitHub. Usando versão local atual. Motivo: $_"
+        }
         
         $localSha = ""
         if (Test-Path $LocalVersionPath) {
             $localSha = Get-Content $LocalVersionPath -Raw
         }
         
-        if ($remoteSha -ne $localSha) {
-            Write-Log "Buscando atualizações de dados no GitHub..."
+        if ($null -ne $remoteSha -and $remoteSha -ne "" -and $remoteSha -ne $localSha) {
+            Write-Log "Atualizando binários locais a partir do repositório..."
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
             $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
-            Write-Log "Arquivos locais sincronizados com sucesso."
+            Write-Log "Atualização do utilitário aplicada com sucesso."
         } else {
-            Write-Log "Os arquivos de dados já estão na versão mais recente."
+            Write-Log "Os arquivos do programa já estão na versão mais recente."
         }
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
-            # O atalho mantém o terminal aberto de forma secundária para depuração
             $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho gerado na Área de Trabalho do usuário."
+            Write-Log "Atalho de Área de Trabalho gerado com sucesso."
         }
     }
     catch {
-        Write-Log "Aviso: Sincronização offline ou indisponível temporariamente."
+        Write-Log "Aviso: Falha geral na verificação de atualização: $_"
     }
 }
 
@@ -287,7 +313,7 @@ $btnUpgradeAll.Size = New-Object System.Drawing.Size(350, 35)
 $tabSystem.Controls.Add($btnUpgradeAll)
 
 
-# --- ABA 4: DIAGNÓSTICO DE LICENÇA ---
+# --- ABA 4: ATIVAÇÃO ---
 $tabActivation = New-Object System.Windows.Forms.TabPage
 $tabActivation.Text = "Licenciamento"
 $tabControl.Controls.Add($tabActivation)
@@ -311,26 +337,37 @@ $tabActivation.Controls.Add($btnAutoActivate)
 $form.Add_Load({
     Write-Log "Iniciando verificação operacional..."
     
+    # --- 2. TRATAMENTO DE ERROS NA THREAD DO LOAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        # Sincroniza os arquivos e gera o atalho persistente local
-        Install-LocalFilesAndShortcut
-        
-        if (Test-Winget) {
-            Write-Log "Gerenciador de pacotes Winget pronto."
-        } else {
-            Write-Log "Aviso: Winget ausente no sistema."
+        try {
+            Install-LocalFilesAndShortcut
+            
+            $wingetReady = Test-Winget
+            if ($wingetReady) {
+                Write-Log "Gerenciador de pacotes Winget pronto."
+            } else {
+                Write-Log "Aviso: Winget ausente no sistema."
+            }
+            
+            $status = "Não Ativado"
+            $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
+            if ($check -match "permanente|permanent|ativado|activated") {
+                $status = "Ativado"
+            }
+            
+            # --- 1. ESCOPO SEGURO NA THREAD DA UI (SUGESTÃO 1) ---
+            $form.Invoke(
+                [Action[string]]{
+                    param($s)
+                    $lblStatus.Text = "Status do Windows: $s"
+                    Write-Log "Licenciamento verificado: $s"
+                },
+                $status
+            )
         }
-        
-        $status = "Não Ativado"
-        $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-        if ($check -match "permanente|permanent|ativado|activated") {
-            $status = "Ativado"
+        catch {
+            Write-Log "ERRO ao inicializar sistema: $_"
         }
-        
-        $form.Invoke([Action]{
-            $lblStatus.Text = "Status do Windows: $status"
-            Write-Log "Licenciamento verificado: $status"
-        })
     }) | Out-Null
 })
 
@@ -338,24 +375,36 @@ $btnAutoActivate.Add_Click({
     $btnAutoActivate.Enabled = $false
     Write-Log "Consultando estado de licenciamento do Windows..."
     
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        $check = cscript //nologo C:\Windows\System32\slmgr.vbs /dli
-        foreach ($line in $check) {
-            if (-not [string]::IsNullOrWhiteSpace($line)) {
-                Write-Log $line.Trim()
+        try {
+            $check = cscript //nologo C:\Windows\System32\slmgr.vbs /dli
+            foreach ($line in $check) {
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-Log $line.Trim()
+                }
             }
+            
+            $status = "Não Ativado"
+            $checkXpr = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
+            if ($checkXpr -match "permanente|permanent|ativado|activated") {
+                $status = "Ativado"
+            }
+            
+            # --- 1. ESCOPO SEGURO NA THREAD DA UI (SUGESTÃO 1) ---
+            $form.Invoke(
+                [Action[string]]{
+                    param($s)
+                    $lblStatus.Text = "Status do Windows: $s"
+                    $btnAutoActivate.Enabled = $true
+                },
+                $status
+            )
         }
-        
-        $status = "Não Ativado"
-        $checkXpr = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-        if ($checkXpr -match "permanente|permanent|ativado|activated") {
-            $status = "Ativado"
+        catch {
+            Write-Log "ERRO ao verificar licença: $_"
+            $form.Invoke([Action]{ $btnAutoActivate.Enabled = $true })
         }
-        
-        $form.Invoke([Action]{
-            $lblStatus.Text = "Status do Windows: $status"
-            $btnAutoActivate.Enabled = $true
-        })
     }) | Out-Null
 })
 
@@ -369,22 +418,30 @@ $btnInstallSelected.Add_Click({
     $btnInstallSelected.Enabled = $false
     Write-Log "Instalações iniciadas em segundo plano..."
     
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        foreach ($cb in $selected) {
-            $name = $cb.Text
-            $id = $cb.Tag
-            Write-Log "Instalando: $name..."
-            
-            $proc = Start-Process winget -ArgumentList "install --id $id --silent --accept-source-agreements --accept-package-agreements" -NoNewWindow -PassThru -Wait
-            
-            if ($proc.ExitCode -eq 0) {
-                Write-Log "Concluído: $name foi instalado com sucesso."
-            } else {
-                Write-Log "Não foi possível concluir a instalação de: $name. Código: $($proc.ExitCode)"
+        try {
+            foreach ($cb in $selected) {
+                $name = $cb.Text
+                $id = $cb.Tag
+                Write-Log "Instalando: $name..."
+                
+                $proc = Start-Process winget -ArgumentList "install --id $id --silent --accept-source-agreements --accept-package-agreements" -NoNewWindow -PassThru -Wait
+                
+                if ($proc.ExitCode -eq 0) {
+                    Write-Log "Concluído: $name foi instalado com sucesso."
+                } else {
+                    Write-Log "Não foi possível concluir a instalação de: $name. Código: $($proc.ExitCode)"
+                }
             }
+            Write-Log "Processos de instalação finalizados."
         }
-        Write-Log "Processos de instalação finalizados."
-        $form.Invoke([Action]{ $btnInstallSelected.Enabled = $true })
+        catch {
+            Write-Log "ERRO durante instalações em lote: $_"
+        }
+        finally {
+            $form.Invoke([Action]{ $btnInstallSelected.Enabled = $true })
+        }
     }) | Out-Null
 })
 
@@ -398,22 +455,30 @@ $btnUninstallSelected.Add_Click({
     $btnUninstallSelected.Enabled = $false
     Write-Log "Desinstalações iniciadas em segundo plano..."
     
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        foreach ($cb in $selected) {
-            $name = $cb.Text
-            $id = $cb.Tag
-            Write-Log "Removendo: $name..."
-            
-            $proc = Start-Process winget -ArgumentList "uninstall --id $id --silent" -NoNewWindow -PassThru -Wait
-            
-            if ($proc.ExitCode -eq 0) {
-                Write-Log "Concluído: $name foi removido."
-            } else {
-                Write-Log "Não foi possível remover: $name."
+        try {
+            foreach ($cb in $selected) {
+                $name = $cb.Text
+                $id = $cb.Tag
+                Write-Log "Removendo: $name..."
+                
+                $proc = Start-Process winget -ArgumentList "uninstall --id $id --silent" -NoNewWindow -PassThru -Wait
+                
+                if ($proc.ExitCode -eq 0) {
+                    Write-Log "Concluído: $name foi removido."
+                } else {
+                    Write-Log "Não foi possível remover: $name."
+                }
             }
+            Write-Log "Processos de remoção finalizados."
         }
-        Write-Log "Processos de remoção finalizados."
-        $form.Invoke([Action]{ $btnUninstallSelected.Enabled = $true })
+        catch {
+            Write-Log "ERRO durante desinstalações em lote: $_"
+        }
+        finally {
+            $form.Invoke([Action]{ $btnUninstallSelected.Enabled = $true })
+        }
     }) | Out-Null
 })
 
@@ -421,32 +486,54 @@ $btnUpgradeAll.Add_Click({
     $btnUpgradeAll.Enabled = $false
     Write-Log "Iniciando atualização de softwares instalados..."
     
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        $proc = Start-Process winget -ArgumentList "upgrade --all --silent" -NoNewWindow -PassThru -Wait
-        Write-Log "Processo de atualizações globais finalizado."
-        $form.Invoke([Action]{ $btnUpgradeAll.Enabled = $true })
+        try {
+            $proc = Start-Process winget -ArgumentList "upgrade --all --silent" -NoNewWindow -PassThru -Wait
+            Write-Log "Processo de atualizações globais finalizado."
+        }
+        catch {
+            Write-Log "ERRO ao atualizar programas: $_"
+        }
+        finally {
+            $form.Invoke([Action]{ $btnUpgradeAll.Enabled = $true })
+        }
     }) | Out-Null
 })
 
 $btnListInstalled.Add_Click({
     Write-Log "Consultando softwares locais..."
+    
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        $list = winget list
-        foreach ($line in $list) {
-            Write-Log $line
+        try {
+            $list = winget list
+            foreach ($line in $list) {
+                Write-Log $line
+            }
+            Write-Log "Fim da lista de softwares locais."
         }
-        Write-Log "Fim da lista de softwares locais."
+        catch {
+            Write-Log "ERRO ao carregar lista de programas: $_"
+        }
     }) | Out-Null
 })
 
 $btnEdgeTweak.Add_Click({
     Write-Log "Iniciando aplicação de diretivas no Edge..."
+    
+    # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        $res = Set-EdgeGoogleDefault
-        if ($res) {
-            Write-Log "O Google foi configurado com sucesso como padrão no Edge."
-        } else {
-            Write-Log "Erro ao tentar salvar as chaves no registro."
+        try {
+            $res = Set-EdgeGoogleDefault
+            if ($res) {
+                Write-Log "O Google foi configurado com sucesso como padrão no Edge."
+            } else {
+                Write-Log "Erro ao tentar salvar as chaves no registro."
+            }
+        }
+        catch {
+            Write-Log "ERRO ao aplicar diretivas do Edge: $_"
         }
     }) | Out-Null
 })
@@ -480,10 +567,17 @@ $btnCustomInstall.Add_Click({
         $progName = $txtInput.Text
         if (-not [string]::IsNullOrEmpty($progName)) {
             Write-Log "Buscando por: '$progName' no catálogo..."
+            
+            # --- 2. TRATAMENTO DE ERROS NA THREAD (SUGESTÃO 2) ---
             [System.Threading.ThreadPool]::QueueUserWorkItem({
-                $results = winget search --name $progName
-                foreach ($line in $results) {
-                    Write-Log $line
+                try {
+                    $results = winget search --name $progName
+                    foreach ($line in $results) {
+                        Write-Log $line
+                    }
+                }
+                catch {
+                    Write-Log "ERRO ao pesquisar programa: $_"
                 }
             }) | Out-Null
             $inputBox.Close()
