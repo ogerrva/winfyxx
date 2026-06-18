@@ -8,7 +8,7 @@ $LocalScriptPath = Join-Path $InstallDir "main.ps1"
 $LocalVersionPath = Join-Path $InstallDir "version.txt"
 $ShortcutPath = "$env:USERPROFILE\Desktop\FYXX Utility.lnk"
 
-# --- BOOTSTRAP: DESACOPLAMENTO DE PROCESSO (Roda no terminal do cliente) ---
+# --- BOOTSTRAP: DESACOPLAMENTO E ELEVAÇÃO (Mantém o console aberto) ---
 if (-not $PSCommandPath -or -not $isAdmin) {
     if (-not (Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -21,24 +21,12 @@ if (-not $PSCommandPath -or -not $isAdmin) {
         Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
     }
     catch {
-        # Fallback offline
+        # Fallback silencioso offline
     }
 
+    # Inicia um novo processo do PowerShell visível e elevado
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`"" -Verb RunAs
     Exit
-}
-
-# --- EXECUÇÃO DO PROCESSO INDEPENDENTE ---
-
-# Carrega APIs sem sensibilidade de formatação ou de espaço de linha (sem here-strings)
-if (-not ([System.Management.Automation.PSTypeName]"Win32.Win32ConsoleUtils").Type) {
-    $MemberDef = '[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);'
-    Add-Type -MemberDefinition $MemberDef -Name "Win32ConsoleUtils" -Namespace "Win32" | Out-Null
-}
-
-$hwnd = [Win32.Win32ConsoleUtils]::GetConsoleWindow()
-if ($hwnd -ne [IntPtr]::Zero) {
-    [Win32.Win32ConsoleUtils]::ShowWindowAsync($hwnd, 0) | Out-Null
 }
 
 # Carrega as bibliotecas gráficas do .NET
@@ -107,24 +95,25 @@ function Install-LocalFilesAndShortcut {
         }
         
         if ($remoteSha -ne $localSha) {
-            Write-Log "Atualizando binários locais a partir do repositório..."
+            Write-Log "Buscando atualizações de dados no GitHub..."
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/main.ps1?t=$timestamp" -Headers $headers -OutFile $LocalScriptPath
             Invoke-RestMethod "https://raw.githubusercontent.com/ogerrva/winfyxx/main/apps.json?t=$timestamp" -Headers $headers -OutFile $JsonPath
             $remoteSha | Out-File $LocalVersionPath -NoNewline -Encoding utf8
-            Write-Log "Atualização do utilitário aplicada com sucesso."
+            Write-Log "Arquivos locais sincronizados com sucesso."
         } else {
-            Write-Log "O utilitário já se encontra na última versão estável."
+            Write-Log "Os arquivos de dados já estão na versão mais recente."
         }
         
         if (-not (Test-Path $ShortcutPath)) {
             $WshShell = New-Object -ComObject WScript.Shell
             $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = "powershell.exe"
-            $Shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
+            # O atalho mantém o terminal aberto de forma secundária para depuração
+            $Shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$LocalScriptPath`""
             $Shortcut.IconLocation = "powershell.exe"
             $Shortcut.WorkingDirectory = $InstallDir
             $Shortcut.Save()
-            Write-Log "Atalho de Área de Trabalho gerado com sucesso."
+            Write-Log "Atalho gerado na Área de Trabalho do usuário."
         }
     }
     catch {
@@ -170,7 +159,7 @@ $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
 
-# Força a criação do identificador de janela de imediato no thread visual principal
+# Força a criação do identificador de janela de imediato
 $null = $form.Handle
 
 $titleLabel = New-Object System.Windows.Forms.Label
@@ -298,9 +287,9 @@ $btnUpgradeAll.Size = New-Object System.Drawing.Size(350, 35)
 $tabSystem.Controls.Add($btnUpgradeAll)
 
 
-# --- ABA 4: ATIVAÇÃO ---
+# --- ABA 4: DIAGNÓSTICO DE LICENÇA ---
 $tabActivation = New-Object System.Windows.Forms.TabPage
-$tabActivation.Text = "Ativação do Windows"
+$tabActivation.Text = "Licenciamento"
 $tabControl.Controls.Add($tabActivation)
 
 $lblStatus = New-Object System.Windows.Forms.Label
@@ -311,9 +300,9 @@ $lblStatus.Size = New-Object System.Drawing.Size(400, 25)
 $tabActivation.Controls.Add($lblStatus)
 
 $btnAutoActivate = New-Object System.Windows.Forms.Button
-$btnAutoActivate.Text = "Ativar Windows"
+$btnAutoActivate.Text = "Verificar Licença do Windows"
 $btnAutoActivate.Location = New-Object System.Drawing.Point(20, 70)
-$btnAutoActivate.Size = New-Object System.Drawing.Size(200, 35)
+$btnAutoActivate.Size = New-Object System.Drawing.Size(250, 35)
 $tabActivation.Controls.Add($btnAutoActivate)
 
 
@@ -347,42 +336,24 @@ $form.Add_Load({
 
 $btnAutoActivate.Add_Click({
     $btnAutoActivate.Enabled = $false
-    Write-Log "Iniciando processo de ativação silenciosa..."
+    Write-Log "Consultando estado de licenciamento do Windows..."
     
     [System.Threading.ThreadPool]::QueueUserWorkItem({
-        $check = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-        if ($check -match "permanente|permanent|ativado|activated") {
-            Write-Log "O Windows já está ativado."
-            $form.Invoke([Action]{ $btnAutoActivate.Enabled = $true })
-            return
-        }
-        
-        Write-Log "Aplicando chave de produto padrão..."
-        $procKey = Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /ipk W269N-WFGWX-YVC9B-4J6C9-T83GX" -NoNewWindow -PassThru -Wait
-        
-        $KMS_Servers = @("kms.loli.best", "zh.us.to", "kms.digiboy.ir", "kms.msguides.com")
-        $success = $false
-        
-        foreach ($server in $KMS_Servers) {
-            Write-Log "Tentando conexão com o servidor KMS: $server..."
-            
-            $pSkms = Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /skms $server" -NoNewWindow -PassThru -Wait
-            $pAto = Start-Process cscript -ArgumentList "C:\Windows\System32\slmgr.vbs /ato" -NoNewWindow -PassThru -Wait
-            
-            $checkStatus = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
-            if ($checkStatus -match "permanente|permanent|ativado|activated") {
-                $success = $true
-                Write-Log "Ativação concluída com sucesso através de: $server"
-                break
+        $check = cscript //nologo C:\Windows\System32\slmgr.vbs /dli
+        foreach ($line in $check) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                Write-Log $line.Trim()
             }
         }
         
-        if (-not $success) {
-            Write-Log "Falha na ativação com os servidores disponíveis."
+        $status = "Não Ativado"
+        $checkXpr = cscript //nologo C:\Windows\System32\slmgr.vbs /xpr
+        if ($checkXpr -match "permanente|permanent|ativado|activated") {
+            $status = "Ativado"
         }
         
         $form.Invoke([Action]{
-            $lblStatus.Text = "Status do Windows: " + (if ($success) { "Ativado" } else { "Não Ativado" })
+            $lblStatus.Text = "Status do Windows: $status"
             $btnAutoActivate.Enabled = $true
         })
     }) | Out-Null
@@ -407,9 +378,9 @@ $btnInstallSelected.Add_Click({
             $proc = Start-Process winget -ArgumentList "install --id $id --silent --accept-source-agreements --accept-package-agreements" -NoNewWindow -PassThru -Wait
             
             if ($proc.ExitCode -eq 0) {
-                Write-Log "Concluído: $name foi instalado."
+                Write-Log "Concluído: $name foi instalado com sucesso."
             } else {
-                Write-Log "Não foi possível concluir a instalação de: $name."
+                Write-Log "Não foi possível concluir a instalação de: $name. Código: $($proc.ExitCode)"
             }
         }
         Write-Log "Processos de instalação finalizados."
